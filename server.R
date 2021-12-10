@@ -117,7 +117,6 @@ shinyServer(function(input, output, session) {
       }
       else
       {
-        print("some ratings")
         newdata = createUserRating_RatingMatrix(ratings, user_ratings)
         
         pred = predict(r_ubcf, newdata, type="ratings")
