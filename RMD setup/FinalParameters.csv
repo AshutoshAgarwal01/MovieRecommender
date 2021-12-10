@@ -1,0 +1,3 @@
+Model Name,Parameter Name,Parameter Description,Value
+SVD,k,Number of latent variables,70
+SVD,Normalize,Using Z-Score method to standardize ratings for each user.,Z-Score

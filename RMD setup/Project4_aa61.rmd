@@ -1,0 +1,548 @@
+---
+title: "(PSL) Project 4 - Movie Recommendation"
+author: "CS 598, Ashutosh Agarwal (aa61)"
+date: "Fall 2021"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    theme: readable
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1. Introduction
+
+We will be building and evaluating multiple movie recommendation systems by using data available in [MovieLens 1M dataset](https://grouplens.org/datasets/movielens/1m/). 
+
+We will build following two recommendation systems:
+
+#### **System I**
+  
+  In this system we will assume that we only know user's favorite genre. Based on this information we will recommend **Most popular movies** and **Trending movies** to user.
+  
+#### **System II**
+  
+  In this system, we assume that we have ratings data of a user for few movies. Based on training data we will train Collaborative filtering model. Using that model, we will predict ratings for movies that user has still not rated. And finally we will use this model in ShinyApp to show top 10 recommendations.
+
+In addition to these systems, we will be implementing a Shiny App which will demonstrate these systems.
+
+## 2. Dataset
+
+This dataset contains following files:
+
+  - [Movies.dat](https://liangfgithub.github.io/MovieData/movies.dat?raw=true)
+  
+    There are total `3883` movies in the file. We have `MovieID, Title, Generes and image_url` for each movie.
+  
+  - [Ratings.dat](https://liangfgithub.github.io/MovieData/ratings.dat?raw=true)
+  
+    There are total `1000209` available for the movies in `movies.dat` file. We have `UserId, MovieID, Rating and Timestamp` for each review. Ratings are between 1 and 5. Timestamp is the time when the movie was reviewed by given user. Note that all users have not reviewed all movies.
+    
+  - [users.dat](https://liangfgithub.github.io/MovieData/users.dat?raw=true) We will not be using this file because none of the use case in the app require user data.
+  
+## 3. Loading libraries
+
+```{r message=FALSE, warning=FALSE}
+library(recommenderlab)
+library(data.table)
+library(lubridate)
+library(dplyr)
+library(knitr)
+library(kableExtra)
+```
+
+## 4. Loading and pre-processing data
+
+Loading movie dataset
+
+```{r eval=TRUE}
+dataUrl = "https://liangfgithub.github.io/MovieData/"
+movies = readLines(paste0(dataUrl, 'movies.dat?raw=true'))
+movies = strsplit(movies, split = "::", fixed = TRUE, useBytes = TRUE)
+movies = matrix(unlist(movies), ncol = 3, byrow = TRUE)
+movies = data.frame(movies, stringsAsFactors = FALSE)
+
+colnames(movies) = c('MovieID', 'Title', 'Genres')
+movies$MovieID = as.integer(movies$MovieID)
+movies$Title = iconv(movies$Title, "latin1", "UTF-8")
+
+small_image_url = "https://liangfgithub.github.io/MovieImages/"
+movies$image_url = sapply(movies$MovieID, 
+                          function(x) paste0(small_image_url, x, '.jpg?raw=true'))
+```
+
+Extracting premier date of the movie from Title.
+
+```{r eval=TRUE}
+year = regmatches(movies$Title, regexpr("\\((19|20)\\d{2}\\)", movies$Title))
+year = strtoi(substr(year, 2, 5)) # Remove brackets
+movies = cbind(movies, year)
+```
+
+Loading reviews dataset
+
+```{r eval=TRUE}
+# Reading ratings data
+ratings = read.csv(paste0(dataUrl, 'ratings.dat?raw=true'), 
+                   sep = ':',
+                   colClasses = c('integer', 'NULL'), 
+                   header = FALSE)
+colnames(ratings) = c('UserID', 'MovieID', 'Rating', 'Timestamp')
+```
+
+Adding a new column **Age**. This column will tell Age of review in days.
+
+Age is calculated by keeping latest review date as reference. Newest review will have Age = 1
+
+```{r eval=TRUE}
+# Age of newest rating is 1.
+k = difftime(time1 = as_datetime(ratings$Timestamp), time2 = as_datetime(max(ratings$Timestamp)), units = "days")
+
+# Adding 1 so that newest rating has non-zero age.
+ratings$Age = as.numeric(round(abs(k))) + 1
+```
+
+**Examples from movie dataset**
+
+```{r}
+head(movies) %>% 
+  kbl() %>% 
+  kable_styling()
+```
+**Examples from ratings dataset**
+
+```{r}
+head(ratings) %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
+## 5. Common functions
+
+- This method creates utility matrix between movies and ratings. We will select only those movies that belong to given genre.
+
+```{r}
+createRatingMatrixByGenre = function(movies, ratings, genre){
+  mIds = movies[which(grepl(genre, movies$Genres)), ]$MovieID
+  filteredRatings = ratings[ratings$MovieID %in% mIds, ]
+  
+  createRatingMatrix(filteredRatings)
+}
+```
+
+- A generic method that creates utility matrix between users and ratings.
+
+```{r}
+createRatingMatrix = function(ratings){
+  i = paste0('u', ratings$UserID)
+  j = paste0('m', ratings$MovieID)
+  x = ratings$Rating
+  tmp = data.frame(i, j, x, stringsAsFactors = T)
+  Rmat = sparseMatrix(as.integer(tmp$i), as.integer(tmp$j), x = tmp$x)
+  rownames(Rmat) = levels(tmp$i)
+  colnames(Rmat) = levels(tmp$j)
+  Rmat = new('realRatingMatrix', data = Rmat)
+  Rmat
+}
+```
+
+This method takes user ratings of few movies and converts that to a full Utility matrix contaning all movies in full data set.
+
+```{r}
+# This rating matrix contains two users
+# 9 - real user
+# 8 fake user - we added fake user so that we can create a rating matrix containg same number of columns as full ratingMatrix
+# We will not consider this user's predictions.
+createUserRating_RatingMatrix = function(ratings, user_ratings)
+{
+  user_ratings = cbind(UserID = rep(9, nrow(user_ratings)), user_ratings)
+  
+  unique_movies = unique(ratings$MovieID)
+  newdata = data.frame(UserID = rep(8, length(unique_movies)), MovieID = unique_movies, Rating = rep(1, length(unique_movies)))
+  newdata = rbind(newdata, user_ratings)
+  
+  as(newdata, "realRatingMatrix")[2, ]
+}
+```
+
+## 6. System I
+
+In this system of recommendation, we assume that we do not know anything except user's favorite genre. We will develop systems that will provide them recommendations based on following schemes.
+
+### 6.1 Most popular by genre
+
+A movie with highest average rating across the dataset for given genre will be most popular movie for that genre. However there are two issues in this approach.
+
+  1. **User rating bias**: We cannot take simple average of all ratings for a given movie because every user rates movies differently. Some are very generous and others are very liberal.
+  
+  **Solution** To compensate user rating bias, we normalize rating of each user first. We perform normalization using `Z-Score` method.
+  
+  2. There are some movies that contain very small number of ratings. If we encounter a movie that has only one 5 star rating then with above logic, that movie will become most popular. We will fix this issue by assigning weight to movies by number of reviews.
+  
+Following chart shows that there are large number of movies that have very small number of user ratings.
+  
+```{r}
+rpm = ratings %>% group_by(MovieID) %>% summarise(ratingsPerMovie = n())
+
+hist(rpm$ratingsPerMovie, breaks = 200, main = "Distribution of ratings per movie", xlab = "Number of ratings", ylab = "Count of movies")
+```
+
+There are more than 100 movies that have exactly one review. There are many more that have less than 5 reviews.
+
+```{r}
+nrow(rpm[rpm$ratingsPerMovie == 1, ])
+```
+
+  **Solution** We assign weight to each movie such that movie with higher review count will have higher weight. This way, we penalize movies that have very less number of ratings available. Weight is calculated by scaling number of ratings across movies. Weight is always positive.
+
+Following method implements details provided above. This method returns top 'n' popular movies for the given genre.
+
+```{r}
+topNPopularByGenre = function(movies, ratings, genre, n = 20)
+{
+  rmat_genre = createRatingMatrixByGenre(movies, ratings, genre)
+  rmat_genre_norm = normalize(rmat_genre, method="Z-score")
+  
+  rcount = apply(as(rmat_genre, "matrix"), 2, function(x) sum(!is.na(x)))
+  
+  # Assign more weight to movies that had high count of ratings.
+  # This will be an issue for negative ratings because smaller ratings multiplied with smaller weights will end in larger product.
+  rweight = scale(rcount, center = FALSE)
+  
+  top_n = sort(colMeans(rmat_genre_norm) * as.numeric(rweight), decreasing = TRUE)[1:n]
+  
+  # movie Ids start with "m" in ratings matrix
+  # removing "m"
+  names(top_n) = strtoi(sub('.', '', names(top_n)))
+  top_n
+}
+```
+
+#### Example
+
+In this example, we are showing top 5 most popular 'Action' movies.
+
+```{r}
+top5 = topNPopularByGenre(movies, ratings, "Action", n = 5)
+
+movies[movies$MovieID %in% names(top5), ][, c(1:3)] %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
+### 6.2 Most trending in last 60 days.
+
+We measure trendiness by number of views for the movie in given time interval. However we do not have viewership data in this dataset. Therefore we are using number of reviews to infer viewership.
+
+$$ViewCount \propto ReviewCount$$
+
+We are trying to capture two facts in our method:
+
+  - It does not matter whether review was positive or negative. Even negatively rated movies also trend sometimes for various reasons.
+  
+  - We do not consider release date of the movie for this calculation because sometimes older movies trend in different time period. For example several pandemic related older movies were trending during initial part of COVID.
+
+#### How do we calculate trendiness
+
+We take recent reviews (say past 60 days) into consideration. We aggregate this data to get number of reviews for each movie. Then we sort this data in descending order.
+
+#### Data exploration
+
+Range of movie release year
+
+```{r}
+range(movies$year) 
+```
+
+Range of movie review year
+
+```{r}
+range(as_datetime(ratings$Timestamp)) 
+```
+Distribution of reviews by their age
+
+```{r}
+hist(ratings$Age, breaks = 50, main = "Distribution of review count by age of review", xlab = "Age (days)", ylab = "Count of Reviews") 
+```
+
+It is important to note that all old and new movies were reviewed between year 2000 and 2003. Most of the reviews are old, which means that people reviewed a lot of movies in the beginning but this activity slowed down later.
+
+In real world movies are reviewed on regular basis, we would have seen this distribution reversed. i.e. we would have more reviews in recent time than before.
+
+Following method implements logic to find top n trending movies as described above.
+
+```{r}
+topNTrendingByGenre = function(movies, ratings, genre, age = 60, n = 20)
+{
+  filteredRatings = ratings[which(ratings$Age <= age), ]
+  rmat_genre = createRatingMatrixByGenre(movies, filteredRatings, genre)
+  
+  rcount = apply(as(rmat_genre, "matrix"), 2, function(x) sum(!is.na(x)))
+  
+  top_n = sort(rcount, decreasing = TRUE)[1:n]
+  
+  # movie Ids start with "m" in ratings matrix
+  # removing "m"
+  names(top_n) = strtoi(sub('.', '', names(top_n)))
+  top_n
+}
+```
+
+#### Example
+
+In this example, we are showing top 5 trending 'Action' movies. We are considering past 60 days window for this. In practice, 60 days window is very large to measure trendiness but we do not have enough data to report this for shorter time interval.
+
+```{r}
+top5trendy = topNTrendingByGenre(movies, ratings, "Action", age = 60, n = 5)
+movies[movies$MovieID %in% names(top5trendy), ][, c(1:3)] %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
+## 7. System II - Collaborative filtering
+
+Collaborative filtering uses rating given by many users for many items to predict ratings of those items that were not rated by a user (called active user.)
+
+We are exploring following two approaches upcoming sections:
+
+### 7.1 UBCF - User based collaborative filtering
+  
+Assumption behind this approach is that similar users will prefer similar items. 
+
+In this approach, we do following  
+
+  - Find users that are similar to a given (active) user. We do this by calculating similarity measure between two users. For calculating similarity using rating data, only those items are used which were rated by both users. 
+
+  - Then we select a set of nearest neighbors based on this similarity data. This can be done by keeping "k" nearest neighborhood or by keeping all users in a pre-defined neighborhood. 
+
+  - Now we generate estimated ratings of active user. We compute the average ratings in the neighborhood for each item not rated by the active user. 
+  
+    - Average can be simple average or 
+    
+    - Weighted average – more similar users' ratings get more weight during averaging. 
+
+ This way, we fill missing ratings of active user by using data of other similar users. 
+ 
+**How to calculate similarity** `Pearson Correlation Coefficient` and `Cosine` similarity are two popular methods for calculating similarity between users or items (In case of IBCF).
+
+**Normalization**: Ratings have user bias. For example some users are strict in their ratings while others are a bit relax. Therefore there could be rating bias present in the data. To remove this bias we can normalize each users' rating. Following are two approaches: 
+
+  - Remove user's mean from each rating. 
+  
+  - Standardize using "Z-Score" method - we found this as more robust method for movies dataset. RMSE was better while using this approach.
+  
+### 7.2 SVD approximation
+
+In this approach we decompose the original Rating matrix as product of two narrow and skinny matrices. One matrix (U) represents users and another (V)  represents movies.
+
+$$R_{mxn} \approx U_{mxd} V^t_{dxn}$$
+
+Here `d` is number of latent variables which is a key parameter for SVS based recommendation models. 
+
+Important thing to note here is that since utility matrix contains missing values, classical SVS algorithm will not work here. Instead `Stochastic Gradient Descent algorithm` is used to approximate the factorization above. Approximate factorization is achieved by minimizing following objective function using Gradient Descent Algorithm.
+
+$$\sum_{R_{i,j} \neq NA} (R_{i,j} - u_i^tv_j)^2 + \lambda_1Pen(U) + \lambda_2Pen(V)$$
+
+Where $u_i$ is the i-th row of the matrix U and $v_j$ is the j-th row of matrix V. Then we can predict any missing entries in R by the corresponding linear product of $u_i$ and $v_j$
+
+Above method has user and item bias (as discussed in UBCF). This objective function is further improved by removing user and item bias.
+
+### 7.3 Training and evaluating models
+
+In this section, we will train `UBCF and SVD` models for recommendations. For the purposes for this report we are fixing some model parameters and tuning only one parameter from each model. We are doing this because predictions using `UBCF` is very slow which was causing RMD preparation a long time.
+
+Following table lists all parameters and their values used.
+
+```{r echo=FALSE}
+paramDesc = read.csv("ParameterDescription.csv")
+paramDesc %>% 
+  kbl(caption = "Parameter, their values and descriptions") %>% 
+  kable_styling()
+```
+Creating Utility matrix
+
+```{r}
+set.seed(1500)
+
+ratingMatrix = createRatingMatrix(ratings)
+```
+
+```{r}
+folds = 10
+```
+
+**Train and test setup**: 
+
+Following table lists all parameters and their values used for evaluating recommendation model.
+
+```{r echo=FALSE}
+paramDesc = read.csv("TuningSetup.csv")
+paramDesc %>% 
+  kbl(caption = "Parameter, their values and descriptions for evaluation scheme") %>% 
+  kable_styling()
+```
+
+We selected `Given = 10` because we expect users to provide about 10 ratings when asked on the ShinyApp. We will use RMSE as our evaluation measure.
+
+```{r results='hide'}
+finalResults = matrix(0, 1, 5)
+colnames(finalResults) = c("Method", "k", "RMSE", "MSE", "MAE")
+finalResults = finalResults[-1, ]
+
+scheme_multi = evaluationScheme(ratingMatrix, method = "split", train = 0.9, given = 10, k = folds)
+
+k = 20
+for (iter in 1:10) {
+  algorithms = list(
+  "SVD approximation" = list(name="SVD", param=list(k = k, normalize = "Z-score")),
+  "user-based CF" = list(name="UBCF", param=list(nn=k, method = "Cosine", normalize = "Z-score", weighted = TRUE))
+  )
+  
+  results = evaluate(scheme_multi, algorithms, type = "ratings")
+  
+  finalResults = rbind(finalResults, c("SVDA", k, avg(results$`SVD approximation`)))
+  finalResults = rbind(finalResults, c("UBCF", k, avg(results$`user-based CF`)))
+  
+  k = k + 10
+}
+```
+
+**Plotting RMSE for each value of K**
+
+RMSE for a given value of k was calculated by averaging RMSEs of all 10 folds.
+
+```{r}
+df = data.frame(finalResults)
+df_ubcf = df[df$Method == "UBCF", ]
+df_svd = df[df$Method == "SVDA", ]
+
+plot(df_ubcf$k, df_ubcf$RMSE, type="o", col="blue", pch="o", lty=1, ylim=c(0.9,1.3), main = "K vs RMSE", xlab = "K", ylab = "RMSE")
+points(df_svd$k, df_svd$RMSE, col="red", pch="*")
+lines(df_svd$k, df_svd$RMSE, col="red",lty=2)
+legend(20, 1.3, col=c("red", "blue"), legend = c("SVD", "UBCF"), lty = 1:2)
+```
+
+## 8 Observations
+
+  - RMSE of `SVD` is consistently smaller than `UBCF`
+  
+  - RMSE of `UBCF` keeps decreasing with increase of nearest neighbor. But higher nearest neighbor means bigger and slower model.
+  
+  - RMSE of `SVD` also decreases with increase in number of latent features but this increase is very small. Therefore we will stick to a lower value of latent variable so that model is smaller and faster.
+  
+  - Following is runtime for one fold's execution of `SVD` and `UBCF`. It is clear that UBCF has much larger predict time than SVD model.
+  
+```{r echo=FALSE}
+paramDesc = read.csv("Runtime.csv")
+paramDesc %>% 
+  kbl(caption = "Parameter, their values and descriptions for evaluation scheme") %>% 
+  kable_styling()
+```
+  
+## 9 SVD - Final model selected for SninyApp
+
+From all observations above, we are confident that SVD performs much better than UBCF for this dataset. Therefore we will proceed with this model for the ShinyApp.
+
+Following are parameters of our model.
+
+```{r echo=FALSE}
+paramDesc = read.csv("FinalParameters.csv")
+paramDesc %>% 
+  kbl(caption = "Parameter, their values and descriptions for final model") %>% 
+  kable_styling()
+```
+
+### 9.1 SVD Model in action - sample predictions
+
+In this section we will make some predictions. User has reviewed following four movies.
+
+```{r}
+ratedMovieIds = c(2, 19, 6, 1)
+userMovieRatings = c(5, 5, 2, 4)
+
+cbind(movies[movies$MovieID %in% ratedMovieIds, c(1:3, 5)], Ratings = userMovieRatings) %>% 
+  kbl() %>%
+  kable_styling()
+```
+
+Here we use SVD model that we selected during training process.
+
+We are using parameters that we tuned earlier.
+
+  - K = 70
+  
+  - normalize = Z-Score
+  
+We are showing 10 movies with highest ratings in descending order of ratings. 
+
+```{r eval=TRUE}
+# Using entire dataset for model this time.
+r_svd = Recommender(ratingMatrix, "SVD", param=list(k = 70, normalize = "Z-score"))
+
+# User ratings for some movies
+user_ratings = data.table(MovieID = ratedMovieIds, Rating = userMovieRatings)
+
+newdata = createUserRating_RatingMatrix(ratings, user_ratings)
+
+# Predicting ratings of movies that were unrated by the user.
+pred = predict(r_svd, newdata, type="ratings")
+
+# Selecting only real user's predictions.
+pred_matrix = as(pred, "matrix")
+
+top10 = pred_matrix[, pred_matrix %in% tail(sort(pred_matrix),10)][1:10]
+
+# Remove "m" from movie. It will give movie ID.
+movieIds = strtoi(sub('.', '', names(top10)))
+
+top10 = cbind(movieIds, as.data.frame(top10))
+colnames(top10) = c("MovieID", "Ratings")
+
+top10 = merge(top10, movies, by="MovieID")[, c(1:4, 6)]
+
+top10[order(top10$Ratings, decreasing = TRUE), ] %>% 
+  kbl() %>%
+  kable_styling()
+```
+
+Count of movies
+
+```{r}
+length(pred_matrix)
+```
+
+Following are the movies for which we did not get prediction. These are the movies that user already rated. This is because Recommenderlab returns recommendations only for unrated movies.
+
+```{r}
+movies[which(is.na(pred_matrix)), ][, c(1:3, 5)] %>% 
+  kbl() %>%
+  kable_styling()
+```
+
+**Observations in UBCF**
+
+While I was doing investigation on UBCF results I found following. However these were not observed for SVD.
+
+  - **Some movies did not have predictions**: If we had selected UBCF as out final model then we would have ignored these movies while recommending top 10 movies to user.
+  
+  - **Predicted ratings were outside range [0-5]**: This happened because data was normalized during training and de-normalized later. Predicted ratings go outside range during this process. We could scale the ratings between 0 and 5 by capping any value greater than 5 to 5 and lesser than 0 to 0. This would reduce RMSE. But our purpose is to show top 10 recommendations, therefore we do not make any modifications to the predictions. We just select 10 movies with largest predicted ratings.
+  
+## 10 References
+
+  - [CampusWire discussions](https://campuswire.com/c/G497EEF81/feed/1188)
+  
+  - [Recommenderlab documentation](https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf)
+  
+  - [ShinyDashboard](https://rstudio.github.io/shinydashboard/get_started.html)
+  
+  - [YouTube](https://www.youtube.com/watch?v=QMWydVg-uLg)
+
+## 11 Link to Shiny App
+
+https://ashutosh1.shinyapps.io/MovieRecommender1
