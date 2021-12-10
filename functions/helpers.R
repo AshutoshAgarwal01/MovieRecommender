@@ -158,7 +158,6 @@ topNByGenre = function(movies, ratings, genre, n = 20)
 
 # Get user ratings from UI.
 get_user_ratings = function(value_list) {
-  print(names(value_list))
   dat = data.table(MovieID = sapply(strsplit(names(value_list), "_"), function(x) ifelse(length(x) > 1, x[[2]], NA)),
                    Rating = unlist(as.character(value_list)))
   dat = dat[!is.null(Rating) & !is.na(MovieID)]
