@@ -1,0 +1,3 @@
+Model Name,Train Time,Predict Time
+SVD,4.37sec,1.02sec
+UBCF,0.2sec,94.45sec

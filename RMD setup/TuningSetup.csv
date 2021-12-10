@@ -1,0 +1,5 @@
+Parameter,Value,Description
+Method,Split,Randomly assign a predefined proportion of the users to the training set and all others to the test set.
+Train,0.9,90% of the data will be used for training and rest for testing
+Given,10,During testing on the test set. Only 10 ratings of the test user will be available. Rest will be withheld for validating against prediction. RMSE is calculated by comparing prediction and withheld ratings.
+k,10,Number of folds on which prediction and validation steps will be repeated.

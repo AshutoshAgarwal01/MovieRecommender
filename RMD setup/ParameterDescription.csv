@@ -1,0 +1,8 @@
+Model Name,Parameter Name,Parameter Description,Value
+UBCF,nn,Nearest neighbors (Similar users),Tuning between 20 and 110
+UBCF,Method,Method used to find similarity measure between users.,Cosine
+UBCF,Normalize,Using Z-Score method to standardize ratings for each user.,Z-Score
+UBCF,Weighted,"Are active user's rating calculated by simple average of similar users' ratings or weighted average.
+Here rating given by active user are used as weights.",TRUE
+SVD,k,Number of latent variables,Tuning between 20 and 110
+SVD,Normalize,Using Z-Score method to standardize ratings for each user.,Z-Score
